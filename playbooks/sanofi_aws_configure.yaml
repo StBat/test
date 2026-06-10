@@ -2,6 +2,12 @@
 - name: Configure AWS CLI using aws configure command
   hosts: mara-servers,windows
   tasks:
+    - name: Install AWS CLI if not installed
+      yum:
+        name: aws-cli
+        state: present
+      when: ansible_os_family == "RedHat"
+
     - name: Run aws configure (Linux)
       shell: |
         aws configure set aws_access_key_id {{ aws_access_key }} --profile default

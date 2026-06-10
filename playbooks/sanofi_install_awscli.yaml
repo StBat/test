@@ -2,6 +2,7 @@
   hosts: mara-servers
   become: true
   tasks:
+    # Check if AWS CLI is installed  
     - name: Check if AWS CLI is installed
       ansible.builtin.shell: "command -v aws"
       register: awscli_installed
@@ -57,4 +58,5 @@
 
     - name: Print AWS CLI version
       debug:
-        msg: "AWS CLI is installed: {{ awscli_version.stdout }}"
+        msg: "AWS CLI is installed: {{ awscli_version.stdout | default(awscli_installed.stdout) }}"
+      when: awscli_installed.rc != 0
