@@ -1,0 +1,60 @@
+- name: Install AWS CLI on Linux machine
+  hosts: mara-servers
+  become: true
+  tasks:
+    - name: Check if AWS CLI is installed
+      ansible.builtin.shell: "command -v aws"
+      register: awscli_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Redhat Install the unzip package
+      yum:
+        name: unzip
+        state: present
+      when:
+        - awscli_installed.rc != 0
+        - ansible_os_family == "RedHat"
+
+    - name: Debian Install the unzip package
+      apt:
+        name: unzip
+        state: present
+        update_cache: yes
+      when:
+        - awscli_installed.rc != 0
+        - ansible_os_family == "Debian"
+
+    - name: Download the AWS CLI version 2 installer
+      get_url:
+        url: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+        dest: "/tmp/awscliv2.zip"
+      when: awscli_installed.rc != 0
+
+    - name: Unzip the AWS CLI package
+      unarchive:
+        src: "/tmp/awscliv2.zip"
+        dest: "/tmp/"
+        remote_src: yes
+      when: awscli_installed.rc != 0
+
+    - name: Run the AWS CLI installer
+      shell: "/tmp/aws/install --update"
+      when: awscli_installed.rc != 0
+
+    - name: Create aws symlink in PATH
+      file:
+        src: /usr/local/bin/aws
+        dest: /usr/bin/aws
+        state: link
+        force: yes
+      when: awscli_installed.rc != 0
+
+    - name: Verify AWS CLI installation
+      shell: aws --version
+      register: awscli_version
+      changed_when: false
+
+    - name: Print AWS CLI version
+      debug:
+        msg: "AWS CLI is installed: {{ awscli_version.stdout }}"

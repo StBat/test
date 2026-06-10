@@ -1,0 +1,283 @@
+- name: Install Docker on Amazon Linux EC2
+  hosts: mara-servers
+  become: true
+  tasks:
+    # -------------------------------------------------------------------------
+    # Ensure /apps directory structure exists
+    # -------------------------------------------------------------------------
+    - name: Ensure /apps/data/docker directory exists
+      file:
+        path: /apps/data/docker
+        state: directory
+        mode: '0710'
+
+    - name: Ensure /etc/docker directory exists
+      file:
+        path: /etc/docker
+        state: directory
+        mode: '0755'
+
+    # -------------------------------------------------------------------------
+    # Check existing installation
+    # -------------------------------------------------------------------------
+    - name: Check if Docker is installed
+      command: "docker --version"
+      register: docker_installed
+      ignore_errors: yes
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # Debian-based systems
+    # -------------------------------------------------------------------------
+    - name: Update apt cache on Debian-based systems
+      ansible.builtin.apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install prerequisites on Debian-based systems
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - software-properties-common
+      when:
+        - ansible_os_family == "Debian"
+        - docker_installed.rc is defined and docker_installed.rc != 0
+
+    - name: Add Docker GPG key and repository on Debian-based systems
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - docker_installed.rc is defined and docker_installed.rc != 0
+
+    - name: Add Docker repository on Debian-based systems
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - docker_installed.rc is defined and docker_installed.rc != 0
+
+    - name: Install Docker CE on Debian-based systems
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+      when:
+        - ansible_os_family == "Debian"
+        - docker_installed.rc is defined and docker_installed.rc != 0
+
+    # -------------------------------------------------------------------------
+    # RedHat-based systems — Docker CE from docker.com (not yum docker)
+    # -------------------------------------------------------------------------
+    - name: Update system packages on RedHat
+      yum:
+        name: "*"
+        state: latest
+      when:
+        - docker_installed.rc != 0
+        - ansible_os_family == "RedHat"
+
+    - name: Install dnf-plugins-core on RedHat
+      yum:
+        name: dnf-plugins-core
+        state: present
+      when:
+        - docker_installed.rc != 0
+        - ansible_os_family == "RedHat"
+
+    - name: Remove conflicting packages on RedHat
+      yum:
+        name:
+          - docker
+          - docker-client
+          - docker-client-latest
+          - docker-common
+          - docker-latest
+          - docker-latest-logrotate
+          - docker-logrotate
+          - docker-engine
+          - podman
+          - podman-docker
+          - runc
+        state: absent
+      when:
+        - docker_installed.rc != 0
+        - ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Add Docker CE repository on RedHat
+      get_url:
+        url: https://download.docker.com/linux/rhel/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+        mode: '0644'
+      when:
+        - docker_installed.rc != 0
+        - ansible_os_family == "RedHat"
+
+    - name: Install Docker CE on RedHat
+      yum:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      when:
+        - docker_installed.rc != 0
+        - ansible_os_family == "RedHat"
+
+    # -------------------------------------------------------------------------
+    # Configure Docker data-root to /apps/data/docker
+    # -------------------------------------------------------------------------
+    - name: Configure Docker daemon (data-root + logging)
+      copy:
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+        content: |
+          {
+            "data-root": "/apps/data/docker",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "100m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2"
+          }
+      notify: Restart Docker
+
+    # -------------------------------------------------------------------------
+    # SELinux context for custom data-root (RedHat only)
+    # -------------------------------------------------------------------------
+    - name: Install policycoreutils-python-utils for SELinux management
+      yum:
+        name: policycoreutils-python-utils
+        state: present
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Set SELinux file context for /apps/data/docker
+      command: semanage fcontext -a -e /var/lib/docker /apps/data/docker
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Restore SELinux context on /apps/data/docker
+      command: restorecon -Rv /apps/data/docker
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # Firewalld — remove docker0 from trusted zone, let Docker manage its rules
+    # -------------------------------------------------------------------------
+    - name: Remove docker0 from firewalld trusted zone if present
+      firewalld:
+        interface: docker0
+        zone: trusted
+        permanent: true
+        state: disabled
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+      notify: Reload Firewalld
+
+    # -------------------------------------------------------------------------
+    # Start and enable Docker
+    # -------------------------------------------------------------------------
+    - name: Start and enable Docker service
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    # -------------------------------------------------------------------------
+    # Add ansible_user to docker group
+    # -------------------------------------------------------------------------
+    - name: Add the ansible_user to the docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    # -------------------------------------------------------------------------
+    # Docker Compose — already installed via docker-compose-plugin on RedHat
+    # Fallback for systems where it was not installed via package manager
+    # -------------------------------------------------------------------------
+    - name: Check if Docker Compose is installed
+      command: "docker compose version"
+      register: docker_compose_installed
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Docker Compose (if missing)
+      when: docker_compose_installed.rc != 0
+      block:
+        - name: Make cli-plugins directory
+          file:
+            path: /usr/libexec/docker/cli-plugins
+            state: directory
+            mode: '0755'
+
+        - name: Download Docker Compose
+          get_url:
+            url: "https://github.com/docker/compose/releases/latest/download/docker-compose-{{ ansible_system | lower }}-{{ ansible_architecture }}"
+            dest: /usr/libexec/docker/cli-plugins/docker-compose
+            mode: '0755'
+
+    # -------------------------------------------------------------------------
+    # Verification
+    # -------------------------------------------------------------------------
+    - name: Print Docker version
+      command: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Debug Docker version
+      debug:
+        msg: "Docker installed: {{ docker_version.stdout }}"
+
+    - name: Verify Docker data-root
+      command: docker info --format '{{ "{{" }}.DockerRootDir{{ "}}" }}'
+      register: docker_root
+      changed_when: false
+
+    - name: Assert Docker data-root is /apps/data/docker
+      assert:
+        that: docker_root.stdout == "/apps/data/docker"
+        fail_msg: "Docker data-root is {{ docker_root.stdout }} — expected /apps/data/docker"
+        success_msg: "Docker data-root correctly set to /apps/data/docker"
+
+    - name: Print Docker Compose version
+      command: "docker compose version"
+      register: docker_compose_version
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Debug Docker Compose version
+      debug:
+        msg: "Docker Compose installed: {{ docker_compose_version.stdout }}"
+
+    - name: Reset SSH connection
+      meta: reset_connection
+
+  handlers:
+    - name: Restart Docker
+      service:
+        name: docker
+        state: restarted
+
+    - name: Reload Firewalld
+      service:
+        name: firewalld
+        state: reloaded
